@@ -1,0 +1,20 @@
+	{
+		"accessory":	"mqttgaragedoor",
+		"name":		"Garage",
+		"url":		"mqtts://mqtt.example.com:8883",
+		"username":	"homebridge-mqtt-user",
+		"password":	"super-secret-password",
+		"caption":	"Tor",
+		"doorRunInSeconds": 15,
+		"topics": {
+			"statusSet":		"cmnd/garage/door/power",
+			"statusToggleCmd":	"1",
+			"statusGet":		"stat/garage/door/STATUS10",
+			"openStatusCmdTopic":	"cmnd/garage/door/Status",
+			"openStatusCmd":	"10",
+			"closeStatusCmdTopic":	"cmnd/garage/door/Status",
+			"closeStatusCmd":	"10",
+			"OpenValue":		30,
+			"ClosedValue":		220
+		}
+	}

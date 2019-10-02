@@ -13,14 +13,12 @@
 //		"lwtPayload": "lwt Payload"
 // 		"topics": {
 // 				"statusSet": 	"MQTT TOPIC TO SET THE DOOR OPENER"
-// 				"openGet": 	"OPTIONAL: MQTT TOPIC TO GET THE DOOR OPEN STATUS",
+// 				"statusGet": 	"OPTIONAL: MQTT TOPIC TO GET THE DOOR STATUS",
+// 				"statusTele": 	"OPTIONAL: MQTT TOPIC TO GET THE DOOR STATUS FROM RECURING TELEMETRY",
 // 				"openValue": 	"OPTIONAL VALUE THAT MEANS OPEN (DEFAULT true)"
-// 				"closedGet": 	"OPTIONAL: MQTT TOPIC TO GET THE DOOR CLOSED STATUS",
 // 				"closedValue": 	"OPTIONAL VALUE THAT MEANS CLOSED (DEFAULT true)"
-//				"openStatusCmdTopic": "OPTIONAL: MQTT TOPIC TO ASK ABOUT THE OPEN STATUS",
-//				"openStatusCmd": "OPTIONAL: THE OPEN STATUS COMMAND ( DEFAULT "")",
-//				"closeStatusCmdTopic": "OPTIONAL: MQTT TOPIC TO ASK ABOUT THE CLOSED STATUS",
-//				"closeStatusCmd": "OPTIONAL THE CLOSED STATUS COMMAND (DEFAULT "")",
+//				"statusCmdTopic": "OPTIONAL: MQTT TOPIC TO ASK ABOUT THE STATUS",
+//				"statusCmd": "OPTIONAL: THE STATUS COMMAND ( DEFAULT "")",
 // 			},
 //              "doorRunInSeconds": "OPEN/CLOSE RUN TIME IN SECONDS (DEFAULT 20"),
 //		"pauseInSeconds" : "IF DEFINED : AUTO CLOSE AFTER [Seconds]" 
@@ -54,6 +52,21 @@ function clone(object, extend) {
   return cloned;
 };
 
+function findVal(object, key) {
+    var value;
+    Object.keys(object).some(function(k) {
+        if (k === key) {
+            value = object[k];
+            return true;
+        }
+        if (object[k] && typeof object[k] === 'object') {
+            value = findVal(object[k], key);
+            return value !== undefined;
+        }
+    });
+    return value;
+}
+
 function MqttGarageDoorAccessory(log, config) {
   	this.log          	= log;
   	this.name 		= config["name"];
@@ -79,27 +92,27 @@ function MqttGarageDoorAccessory(log, config) {
 	};
 
 	this.caption		= config["caption"];
-	this.topicOpenGet	= config["topics"].openGet;
-	this.topicClosedGet	= config["topics"].closedGet;
+	this.topicStatusTele	= config["topics"].statusTele; 
+	this.topicStatusGet	= config["topics"].statusGet;
 	this.topicStatusSet	= config["topics"].statusSet;
 	this.OpenValue		= ( config["topics"].openValue !== undefined ) ? config["topics"].openValue : "true";
 	this.ClosedValue	= ( config["topics"].closedValue !== undefined ) ? config["topics"].closedValue : "true";
-	this.openStatusCmdTopic	= config["topics"].openStatusCmdTopic; 
-	this.openStatusCmd	= ( config["topics"].openStatusCmd !== undefined ) ? config["topics"].openStatusCmd : "";
-	this.closeStatusCmdTopic= config["topics"].closeStatusCmdTopic;
-	this.closeStatusCmd	= ( config["topics"].closeStatusCmd !== undefined ) ? config["topics"].closeStatusCmd : "";
+	this.statusCmdTopic	= config["topics"].statusCmdTopic; 
+	this.statusCmd		= ( config["topics"].statusCmd !== undefined ) ? config["topics"].statusCmd : "";
+	this.statusToggleCmd	= ( config["topics"].statusToggleCmd !== undefined ) ? config["topics"].statusToggleCmd : "on";
 
-	if( this.topicOpenGet != undefined || this.topicClosedGet != undefined ) {
+	if( this.topicStatusTele != undefined || this.topicStatusGet != undefined ) {
 		this.lwt = config["lwt"];
 		this.lwt_payload = config["lwtPayload"];
  	};
 
 	this.doorRunInSeconds 	= (config["doorRunInSeconds"] !== undefined ? config["doorRunInSeconds"] : 20 ); 
-	if( !( this.topicOpenGet !== undefined && this.topicClosedGet !== undefined ) ) this.pauseInSeconds = config["pauseInSeconds"]; 
+	if( !( this.topicStatusTele !== undefined || this.topicStatusGet !== undefined ) ) this.pauseInSeconds = config["pauseInSeconds"]; 
 
 	this.topicverbose	= config["topics"].showlog;
 
 	this.Running = false;
+	this.LastDistance = -1;
 	this.Closed = true;
 	this.Open = !this.Closed;
 	this.DoorStateChanged = false;
@@ -142,8 +155,8 @@ function MqttGarageDoorAccessory(log, config) {
 	// based on idea by [MrBalonio] (https://github.com/mrbalonio)
 	this.client.on('connect', function () {
 		that.log('Subscribing to topics');
- 		if( that.topicOpenGet !== undefined ) that.client.subscribe(that.topicOpenGet);
- 		if( that.topicClosedGet !== undefined ) that.client.subscribe(that.topicClosedGet);
+ 		if( that.topicStatusTele !== undefined ) that.client.subscribe(that.topicStatusTele);
+ 		if( that.topicStatusGet !== undefined ) that.client.subscribe(that.topicStatusGet);
  		if( that.lwt !== undefined ) that.client.subscribe(that.lwt);
 	});
 
@@ -170,16 +183,26 @@ function MqttGarageDoorAccessory(log, config) {
 				that.garageDoorOpener.addOptionalCharacteristic(Characteristic.StatusFault);
 				that.StatusFault = that.garageDoorOpener.getCharacteristic(Characteristic.StatusFault);
 			};
-			if (topic == that.topicClosedGet) {
-				var topicGotStatus = (status == that.ClosedValue);
-				that.isClosed( topicGotStatus);
-				if( topicGotStatus ) var NewDoorState = DoorState.CLOSED
-                        	else var NewTarget = DoorState.OPEN;
-			} else {
-				var topicGotStatus = (status == that.OpenValue);
-				that.isOpen( topicGotStatus);
-				if(topicGotStatus) var NewDoorState = DoorState.OPEN
-				else var NewTarget = DoorState.CLOSED;
+			var topicGotStatus = false;
+			if (topic == that.topicStatusGet) {
+				var statusObject = JSON.parse(status);
+				var topicGotStatusDistance = findVal(statusObject,'Distance');
+				if (topicGotStatusDistance !== undefined) {
+					if (topicGotStatusDistance < that.OpenValue) {
+	                                        that.isOpen(true);
+                                                var NewDoorState = DoorState.OPEN;
+                                                var NewTarget = DoorState.CLOSED;
+						topicGotStatus = true;
+			 		} else if (topicGotStatusDistance > that.ClosedValue) {
+						that.isClosed(true);
+						var NewDoorState = DoorState.CLOSED;
+						var NewTarget = DoorState.OPEN;
+						topicGotStatus = true;
+					} else {
+						//TODO: RUNNING STATE OR STATE STOPPED IN BETWEEN	
+					}
+					that.LastDistance = topicGotStatusDistance;
+				}
 			};
 
 	        	that.showLog("Getting state " +that.doorStateReadable(NewDoorState) + " its was " + that.doorStateReadable(that.currentDoorState.value) + " [TOPIC : " + topic + " ]");
@@ -261,7 +284,7 @@ MqttGarageDoorAccessory.prototype = {
 				this.TimeOut = setTimeout(this.setFinalDoorState.bind(this), this.doorRunInSeconds * 1000);
 				if ( context !== 'fromGetValue'){
 		        		this.log("Triggering GarageDoor Command");
-					this.client.publish(this.topicStatusSet, "on");
+					this.client.publish(this.topicStatusSet, this.statusToggleCmd);
 				};
             			this.currentDoorState.setValue( (status == DoorState.OPEN ?  DoorState.OPENING : DoorState.CLOSING ) );
 			};
@@ -274,7 +297,7 @@ MqttGarageDoorAccessory.prototype = {
 			if( this.Closed !== status  ) {
 				this.DoorStateChanged = true;
 				this.Closed = status;
-                		if( this.topicOpenGet == undefined ) this.Open = ! this.Closed;
+                		if( this.topicStatusGet == undefined ) this.Open = ! this.Closed;
 			} else this.DoorStateChanged = false;
 		};
 		return(this.Closed);
@@ -285,7 +308,7 @@ MqttGarageDoorAccessory.prototype = {
 			if( this.Open !== status ) {
 				this.DoorStateChanged = true;
 				this.Open = status;
-				if( this.topicClosedGet == undefined ) this.Closed = ! this.Open;
+				if( this.topicStatusGet == undefined ) this.Closed = ! this.Open;
 			} else this.DoorStateChanged = false;
 		};
 		return(this.Open);
@@ -299,10 +322,10 @@ MqttGarageDoorAccessory.prototype = {
 
 		switch(this.targetDoorState.value) {
 			case DoorState.OPEN:
-				if(this.topicOpenGet == undefined) this.isOpen(true);
+				if(this.topicStatusGet == undefined) this.isOpen(true);
 				break;
 			case DoorState.CLOSED:
-				if(this.topicClosedGet == undefined) this.isClosed(true);
+				if(this.topicStatusGet == undefined) this.isClosed(true);
 				break;
 		};
 		if( ! this.getObstructionState() ){
@@ -317,12 +340,10 @@ MqttGarageDoorAccessory.prototype = {
   	},
 
 	getState: function( callback ) {
-		if( this.openStatusCmdTopic !== undefined ) this.client.publish(this.openStatusCmdTopic, this.openStatusCmd); 
-		if( this.closeStatusCmdTopic !== undefined ) this.client.publish(this.closeStatusCmdTopic, this.closeStatusCmd);
+		if( this.statusCmdTopic !== undefined ) this.client.publish(this.statusCmdTopic, this.statusCmd); 
 		if( this.reachable) {
     			this.log("Garage Door is " + this.doorStateReadable(this.currentDoorState.value) );
                 	callback(null, this.currentDoorState.value);
-//			callback();
 		} else {
 			this.log("Offline");
 			callback(1);
